@@ -1,0 +1,811 @@
+---
+title: "Disaster Relief Project: Part I"
+author: "Karan Manwani"
+date: "`r format(Sys.Date(), '%b %d, %Y')`"
+output:
+  html_document:
+    number_sections: true    
+    toc: true
+    toc_float: true
+    theme: cosmo
+    highlight: espresso    
+# You can make the format personal - this will get you started:  
+# https://bookdown.org/yihui/rmarkdown/html-document.html#appearance_and_style    
+---
+
+<!--- Below are global settings for knitr. You can override any of them by adding the changes to individual chunks --->
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(error=TRUE,        # Keep compiling upon error
+                      collapse=FALSE,    # collapse by default
+                      echo=TRUE,         # echo code by default
+                      comment = "#>",    # change comment character
+                      fig.width = 5.5,     # set figure width
+                      fig.align = "center",# set figure position
+                      out.width = "49%", # set width of displayed images
+                      warning=TRUE,      # show R warnings
+                      message=TRUE,      # show R messages
+                      cache=TRUE)     
+
+```
+
+<!--- Change font sizes (or other css modifications) --->
+<style>
+h1.title {
+  font-size: 2.2em; /* Title font size */
+}
+h1 {
+  font-size: 2em;   /* Header 1 font size */
+}
+h2 {
+  font-size: 1.5em;
+}
+h3 { 
+  font-size: 1.2em;
+}
+pre {
+  font-size: 0.8em;  /* Code and R output font size */
+}
+</style>
+
+
+
+**SYS 6018 | Summer 2021 | University of Virginia **
+
+*******************************************
+
+# Introduction 
+
+#After the earthquake in Haiti in 2010, rescue workers were working in challenging conditions to deliver aid to displaced persons. One of the biggest challenges was locating people who had been displaced in conditions where communication systems had been destroyed and roads were impassable. A solution was to use high resolution geo-referenced imagery taken from airplanes to locate people. It was known that people who had been displaced were setting up blue tarps as temporary shelters, and the location of these blue tarps could be identified by the images in order to help rescue workers determine where to deliver aid to. However, given the number of images, it was difficult and inefficient to go through them manually. A more efficient way is to build a model that would use the RGB codes from the images to determine which images are blue tarps. In this project, I have built several models and calculated the accuracy rates of each to them to determine which model to use. A 10 fold cross-validation was used to evaluate each of the models. 
+
+# Training Data / EDA
+#Load the data, and perform exploratory data analysis using bloxplots for each color for all the classes.
+
+```{R}
+data <- read.csv("HaitiPixels.csv")
+par(cex.axis=0.55)
+boxplot(data$Blue ~ data$Class,las=2)
+boxplot(data$Red ~ data$Class,las=2)
+boxplot(data$Green ~ data$Class,las=2)
+```
+
+#The boxplots show that the numbers for Blue are much higher for blue tarps than the other classes. Hence, we should be able to build a model that can identify blue tarps using the images. It also shows Red tends to be prevelant in Various Non-tarps and rooftops.
+
+```{r load-packages, warning=FALSE, message=FALSE}
+# Load Required Packages
+library(tidyverse)
+library(boot)
+library(caret)
+library(ggplot2)
+library(ROCR)
+library(pROC)
+library(glmnet)
+library(e1071)
+library(kernlab)
+```
+
+
+# Model Training
+#The models below were all built using a 10-fold cross validation, where by the training data would have 10 folds for building the models. The data was trained on all the folds except one fold, which was used for fitting the data, and this was repeated until all folds were used for training and each fold was then used for testing as part of the process. The Training data was made up of 70% of the entire data set and the remaining 30% of the data was used to test the models.
+
+## Set-up 
+
+#Create a new column to split class into 2 - Blue Tarp and Non-Blue Tarpc(for everything that is not a Blue Tarp)
+```{R}
+data <- transform(data, "BlueTarp"= ifelse(Class=="Blue Tarp", "Y", "N"))
+data$BlueTarp<-as.factor(data$BlueTarp)
+```
+
+
+#split data into test and train for validation set cross validations by 70-30 split. Train data will be used for 10-fold validation. Test data will be used for predictions. Set up the specifications for the 10 fold cross-validation.
+
+```{R}
+set.seed(1)
+sample_data<-sample.int(nrow(data),floor(0.7*nrow(data)),replace=F)
+train.data<-data[sample_data, ]
+test.data<-data[-sample_data, ]
+
+ctrlspecs<-trainControl(method="cv",number=10,savePredictions = "all",classProbs = TRUE)
+```
+## Logistic Regression
+#In this model, the response falls into two categories for if an image is a Blue Tarp or not i.e Y or N. We use logistic regression model to determine the probability that an image belongs to a Blue Tarp image or not. 
+```{R}
+model_l<-train(as.factor(BlueTarp)~Red+Green+Blue,data=train.data,method="glm",family=binomial,trControl=ctrlspecs)
+summary(model_l)
+```
+#Logistic Regression Confusion Matrix 
+```{R}
+predictions<-predict(model_l,test.data)
+confusionMatrix(predictions,test.data$BlueTarp,positive = "Y")
+```
+#Calculate the accuracy rate and sensitivity rate with 0.5 Threshold. This means anything with a 0.5 probability or higher will be classified as a Blue Tarp.
+
+```{R}
+(18833+543)/(18833+543+77+20)
+543/(543+77)
+```
+#Based on the caret package default threshold of 0.5, the accuracy rate is 99.5% and sensitivity rate is 87.5%. We are more concerned about sensitivity because we want to identify as many blue tarps as possible even if we get some wrongly classified as blue tarps and it turns out that they are not.
+#Decrease Threshold to 0.1 and calculate a new confusion matrix.
+
+```{R}
+predict_threshold<-predict(model_l,newdata=test.data,type="prob")
+alteredProb<-predict_threshold$Y
+alteredProb<-factor(ifelse(alteredProb>=0.1,"Y","N"))
+confusionMatrix(alteredProb,test.data$BlueTarp,positive = "Y")
+```
+#The accuracy of the model is still around 99%, but the sensitivity has now gone up to 94.8%. The True negative rate is at 99.17%
+
+#ROC Curve for Logistic Model
+#The ROC curve is built from the sample/test data using the model built in the training data.
+```{R}
+predict0 <- predict(model_l,test.data, type = 'raw')
+
+ROCRpred0 <- prediction(as.numeric(predict0),as.numeric(test.data$BlueTarp))
+
+ROCRperf0<- performance(ROCRpred0, 'tpr', 'fpr')
+
+plot(ROCRperf0, colorize=TRUE, text.adj=c(-0.2,1.7))
+```
+#AUC for Logistic model
+#The higher/closer to 1, the better the performance of the model in differentiating between positive and negative classes.
+```{R}
+auc_ROCR <- performance(ROCRpred0, measure = "auc")
+AUC=auc_ROCR@y.values[[1]]
+AUC
+```
+## LDA
+#This model is used to classify patterns between images that are Blue Tarps and those that are not. In this model, we model the distribution of the predictors (red, blue, green) separately in each of the response classes (Y or N for Blue Tarps), and then use Bayes theorem to flip these around into estimates for the probability that a point is a blue tarp given the predictor value.
+```{R}
+model_lda<-train(BlueTarp~Red+Green+Blue,data=train.data,method="lda",trControl=ctrlspecs)
+```
+#LDA Confusion Matrix 
+```{R}
+predictions_lda<-predict(model_lda,newdata = test.data)
+confusionMatrix(predictions_lda,test.data$BlueTarp,positive = "Y")
+```
+#Calculate the accuracy rate and sensitivity rate with 0.5 Threshold
+
+```{R}
+(18160+483)/(18160+483+193+137)
+483/(483+137)
+```
+
+#This gives us an accuracy of 98.2%, but a sensitivity of 77.9%.
+#Decrease Threshold to 0.1 and calculate a new confusion matrix since we are more concerned about sensitivity.
+```{R}
+predict_threshold2<-predict(model_lda,newdata=test.data,type="prob")
+alteredProb2<-predict_threshold2$Y
+alteredProb2<-factor(ifelse(alteredProb2>=0.1,"Y","N"))
+confusionMatrix(alteredProb2,test.data$BlueTarp,positive = "Y")
+```
+#The accuracy remains high at 98.12%, but sensitivity goes up to 82.7%. The True negative rate is at 98.64%
+#ROC Curve for LDA
+```{R}
+predict1 <- predict(model_lda,test.data, type = 'raw')
+
+ROCRpred1 <- prediction(as.numeric(predict1),as.numeric(test.data$BlueTarp))
+
+ROCRperf1<- performance(ROCRpred1, 'tpr', 'fpr')
+
+plot(ROCRperf1, colorize=TRUE, text.adj=c(-0.2,1.7))
+```
+#AUC for LDA
+```{R}
+auc_ROCR1 <- performance(ROCRpred1, measure = "auc")
+AUC1=auc_ROCR1@y.values[[1]]
+AUC1
+```
+## QDA
+#This is like LDA except it assumes that each class has its own covariance matrix. This is a more flexible model than LDA and can do better when the training data set is large.
+```{R}
+model_qda<-train(BlueTarp~Red+Green+Blue,data=train.data,method="qda",trControl=ctrlspecs)
+```
+#QDA Confusion Matrix 
+```{R}
+predictions_qda<-predict(model_qda,newdata = test.data)
+confusionMatrix(predictions_qda,test.data$BlueTarp,positive = "Y")
+```
+#Calculate the accuracy rate and sensitivity rate with 0.5 Threshold
+```{R}
+(18347+513)/(18347+513+107+6)
+513/(620)
+```
+#This gives us an accuracy of 99.4%, but a sensitivity of 82.7%.
+#Decrease Threshold to 0.1 and calculate a new confusion matrix since are more concerned about sensitivity.
+```{R}
+predict_threshold3<-predict(model_qda,newdata=test.data,type="prob")
+alteredProb3<-predict_threshold3$Y
+alteredProb3<-factor(ifelse(alteredProb3>=0.1,"Y","N"))
+confusionMatrix(alteredProb3,test.data$BlueTarp,positive = "Y")
+```
+#The Accuracy remains high at 98.97%, but the sensitivity goes up to 88.87%. The True negative rate is at 99.3%.
+#ROC Curve for QDA Model
+```{R}
+predict2 <- predict(model_qda,test.data, type = 'raw')
+
+ROCRpred2 <- prediction(as.numeric(predict2),as.numeric(test.data$BlueTarp))
+
+ROCRperf2<- performance(ROCRpred2, 'tpr', 'fpr')
+
+plot(ROCRperf2, colorize=TRUE, text.adj=c(-0.2,1.7))
+```
+#AUC for QDA
+```{R}
+auc_ROCR2 <- performance(ROCRpred2, measure = "auc")
+AUC2=auc_ROCR2@y.values[[1]]
+AUC2
+```
+## KNN
+#This model makes a prediction based on the points that are closest to it, and uses them to estimate if an image is a Blue Tarp or not. The number of points used to make this determination is K. As we will see below, there are multiple options to choose from when selecting K, such as 5,7, etc.
+```{R}
+model_knn<-train(BlueTarp~Red+Green+Blue,data=train.data,method="knn",trControl=ctrlspecs)
+```
+
+#Tuning Parameter $k$
+```{R}
+plot(model_knn)
+model_knn
+```
+
+#The value of k used for the KNN model is 7. The plot and table show this produces the highest accuracy rate and it was used in the model.
+
+#KNN Confusion Matrix 
+```{R}
+predictions_knn<-predict(model_knn,newdata = test.data)
+confusionMatrix(predictions_knn,test.data$BlueTarp,positive = "Y")
+```
+#The KNN has an accuracy of 99.7%, and a sensitivity rate of 95% when k=7. The True negative rate is at 99.8%.
+
+#Decrease Threshold to 0.1 and calculate a new confusion matrix since are more concerned about sensitivity.
+```{R}
+predict_threshold4<-predict(model_knn,newdata=test.data,type="prob")
+alteredProb4<-predict_threshold4$Y
+alteredProb4<-factor(ifelse(alteredProb4>=0.1,"Y","N"))
+confusionMatrix(alteredProb4,test.data$BlueTarp,positive = "Y")
+```
+#The Accuracy remains high at 99.55%, but the sensitivity goes up to 98.07%. The True negative rate is at 99.6%.
+
+#ROC Curve for KNN Model
+```{R}
+predict3 <- predict(model_knn,test.data, type = 'raw')
+
+ROCRpred3 <- prediction(as.numeric(predict3),as.numeric(test.data$BlueTarp))
+
+ROCRperf3<- performance(ROCRpred3, 'tpr', 'fpr')
+
+plot(ROCRperf3, colorize=TRUE, text.adj=c(-0.2,1.7))
+```
+#AUC for KNN
+```{R}
+auc_ROCR3 <- performance(ROCRpred3, measure = "auc")
+AUC3=auc_ROCR3@y.values[[1]]
+AUC3
+```
+## Penalized Logistic Regression (Ridge)
+#The Penalized Logistic Regression 
+```{R}
+x.train=model.matrix(BlueTarp~-1+Red+Blue+Green,data=train.data)
+y.train=train.data$BlueTarp
+x.test=model.matrix(BlueTarp~-1+Red+Blue+Green,data=test.data)
+y.test=test.data$BlueTarp
+ridge.fit <- cv.glmnet(x.train, y.train, type.measure="class", 
+  alpha=0, family="binomial",nlambda=100)
+
+```
+```{R}
+ridge.predicted <- predict(ridge.fit, s=ridge.fit$lambda.min, newx=x.test)
+
+```
+## Penalized Logistic Regression (lasso)
+```{R}
+lasso.fit <- cv.glmnet(x.train, y.train, type.measure="class", 
+  alpha=1, family="binomial",nlambda=100)
+
+```
+```{R}
+lasso.predicted <- predict(lasso.fit, s=lasso.fit$lambda.min, newx=x.test)
+
+```
+
+#Calculate the accuracy rate and sensitivity rate with 0.1 Threshold using lasso model
+```{R}
+predict_thresholdls<-predict(lasso.fit, s=lasso.fit$lambda.min, newx=x.test)
+alteredProbls<-predict_thresholdls[,1]
+alteredProbls<-factor(ifelse(alteredProbls>=0.1,"Y","N"))
+confusionMatrix(alteredProbls,test.data$BlueTarp,positive = "Y")
+```
+#This shows a sensitivity rate of 87.4% and overall accuracy of 99.49%
+#ROC Curve and AUROC for Lasso Model
+```{R}
+predictls0 <- predict(lasso.fit, s=lasso.fit$lambda.min, newx=x.test)
+
+ROCRpredls0 <- prediction(as.numeric(predictls0),as.numeric(test.data$BlueTarp))
+
+ROCRperfls0<- performance(ROCRpredls0, 'tpr', 'fpr')
+
+plot(ROCRperfls0, colorize=TRUE, text.adj=c(-0.2,1.7))
+auc_ROCRls0 <- performance(ROCRpredls0, measure = "auc")
+AUCls0=auc_ROCRls@y.values[[1]]
+AUCls0
+```
+
+### Tuning Parameters
+
+#Tuning Parameter Ridge
+```{R}
+plot(ridge.fit)
+
+log(ridge.fit$lambda.min)
+
+```
+###The plot shows that the minimum value of lamda is -5.483995, with a misclassification rate of 0.022. Perform Lasso tuning in order to determine if the misclassification rate can be lower as the ridge did not give a significant improvement.
+
+#Tuning Parameter Lasso
+```{R}
+plot(lasso.fit)
+
+log(lasso.fit$lambda.min)
+
+```
+###The minimum lambda in lasso is -12.02 with a misclassification rate of 0.005. The lasso reduces the misclassification rate and improves the accuracy more than the ridge regression does.
+
+
+
+## Threshold Selection
+#Initially the models were run with the default threshold of 0.5, which would classify any data point with an estimated probability of 0.5 or above as a Blue Tarp. All the models had high accuracy levels with this threshold, but I felt it was more important to reduce this threshold so that even if the probability of an image being a Blue Tarp was lower, it would get picked up. In order words, I was more concerned with having the sensitivity rate higher so we could reach as many people as possible even if some were not Blue Tarps as long as the model still maintained a high accuracy. I reduced the threshold down to 0.1 and this still resulted in high accuracy rates for the models, while bringing up the sensitivity rates. This approach was carried out for all models and resulted in using the 0.1 threshold for all models that required a threshold setting.
+
+# Results (Cross-Validation)
+							
+** CV Performance Table **
+```{R}
+Model<-c("Log Reg","LDA", "QDA", "KNN", "Penalized Log Reg")
+Tuning<-c("-","-","-","k=7","lambda=-12.02, alpha=1")
+AUROC<-c("0.937","0.884","0.9135","0.974","0.999")
+Threshold<-c("0.1","0.1","0.1","0.1","0.1")
+Accuracy<-c("0.9902","0.9812","0.9897","0.9955","0.995")
+TPR<-c("0.948","0.82742","0.889","0.9806","0.874")
+FPR<-c("0.008","0.014","0.007","0.004","0.001")
+Precision<-c("0.7935","0.6732","0.81268","0.8928","0.9695")
+CV.Performance<-data.frame(Model,Tuning,AUROC,Threshold,Accuracy,TPR,FPR,Precision)
+knitr::kable(CV.Performance,"pipe")
+CV.Performance
+```
+#These metrics were calculated using the testing data set, which is 30% of the entire data set that was set up at the start. The models were built using a 10 -fold cross validation on the training dataset. These models were then used for prediction on the testing data.
+
+# Conclusions
+
+### Conclusion \#1 
+#The 5 models present very high accuracy rates of over 98%. The range is a little wider for the sensitivity rates, and the reason sensitivity rate is an important factor in this situation is because we are concerned about reaching as many people as possible even though if we get some false positives in the process as long as it doesn't decrease the accuracy rates by much. I reduced the thresholds to 0.1 as described in the above section on thresholds. From these models, I would select the KNN model as this gives us a high sensitivity rate of 98.06% with an accuracy rate of 99.55% and a false positive rate of 0.4%. The K in the KNN model that produced the best results based on accuracy was 7. This model also has the highest AUROC and precision rates. 
+
+### Conclusion \#2
+#Given that KNN model did very well in this dataset, it appears that the dataset is non-parametric i.e it is an approach where no decisions are made about the shape of the boundary. In other words, it is very flexible. This is why it performs better than the LDA model especially when we look at precision and TPR rates. This is because LDA assumes a linear decision boundary but in this instance the decision boundary seems to be highly non-linear. 
+
+### Conclusion \#3
+#I believe the work here is helpful in saving human lives. Given the high rates of accuracy and sensitivity, I think these models bring in objectiveness in selecting an image that is a Blue Tarp and hence where aid can be delivered. It not only brings in objectiveness to the decision making, but also speed and precision to making the decision which is much harder to match with a manual process using the human eye. It would be much harder to match a 98% accuracy rate just with the human eye and not to mention the time it would take to manually go through each image. Such time and precision in a disaster relief makes all the difference in the world, which is why such algorithms/models should be implemented in these scenarios.
+
+**NOTE: PART II same as above plus add Random Forest and SVM to Model Training.**
+
+#Part 2
+
+# Random Forests
+#This is a tree-based ensemble model, whereby when each split is created in the tree, the variables selected are from a random subset of the total available features. This leads to a greater decorrelation of the trees and can produce very robust models. So, in this case the features would be the RGB colors and each split will have a random subset of this.
+
+#Built the random forest with number of variables as the tuning parameter.
+```{R}
+set.seed(1)
+model_rf<-train(BlueTarp~Red+Green+Blue,data=train.data,method="rf",trControl=ctrlspecs,tuneGrid=expand.grid(mtry=c(2,3)))
+```
+
+#Print and plot the random forest model to show accuracy by number of variables (mtry)
+```{R}
+print(model_rf)
+plot(model_rf)
+```
+#This shows that the model with 2 splits at each node is more accurate and will produce a more optimal model than with 3 splits. Note we cannot do more splits given that we only have 3 variables (RGB).
+
+#Show summary of final random forest model
+```{R}
+model_rf$finalModel
+```
+#The final random forest model has 500 trees with mtry of 2 and this yields an error estimate of 0.29% on the training data.
+
+#Determine the most important variables in the random forest models
+```{R}
+print(varImp(model_rf))
+plot(varImp(model_rf))
+```
+#As can be seen from the table and plot, the most important variable is Blue followed by Red. This makes sense since Blue would be the color determine if an image contains a Blue tarp. Red is also important in ruling out Blue Tarps given how distinct it is from the color Blue. Green is the least important variable.
+
+#RF Confusion Matrix on test data (30% of original set). This is similar to what was done with the initial models.
+```{R}
+predictions_rf<-predict(model_rf,newdata = test.data)
+confusionMatrix(predictions_rf,test.data$BlueTarp,positive = "Y")
+```
+#This shows that a 0.5 threshold the accuracy is 99.66%, and the sensitivity is 93%.
+
+
+#Decrease Threshold to 0.1 and calculate a new confusion matrix since are more concerned about sensitivity.
+```{R}
+predict_threshold5<-predict(model_rf,newdata=test.data,type="prob")
+alteredProb5<-predict_threshold5$Y
+alteredProb5<-factor(ifelse(alteredProb5>=0.1,"Y","N"))
+confusionMatrix(alteredProb5,test.data$BlueTarp,positive = "Y")
+```
+#Based on a threshold of 0.1, the accuracy remains high at 99.55%, and the sensitivity goes up to 98.226%
+
+#ROC Curve for RF Model
+```{R}
+predictrf <- predict(model_rf,test.data, type = 'raw')
+
+ROCRpredrf <- prediction(as.numeric(predictrf),as.numeric(test.data$BlueTarp))
+
+ROCRperfrf<- performance(ROCRpredrf, 'tpr', 'fpr')
+
+plot(ROCRperfrf, colorize=TRUE, text.adj=c(-0.2,1.7))
+```
+#AUC for Random forest
+#The higher/closer to 1, the better the performance of the model in differentiating between positive and negative classes.
+```{R}
+auc_ROCRrf <- performance(ROCRpredrf, measure = "auc")
+AUCrf=auc_ROCRrf@y.values[[1]]
+AUCrf
+```
+# SVM
+#This model uses a function to put the data in a high dimensional space and uses a support vector classifier in this higher dimensional space to make the classifications. The Kernel handles the mapping into the higher dimensional space. We will examine Linear, Polynomial, and Radial kernels for building the SVM model.
+
+#Run an SVM with Linear kernal using 10 fold CV with costs ranging from 0.5 to 5 to find the optimal model. Higher cost mean fewer observations will violate the margin, so this would be more flexible but with a risk of overtraining.
+
+```{R}
+set.seed(1)
+model_svm_linear<- train(BlueTarp~ Red+Green+Blue, data=train.data, method = "svmLinear", trControl = ctrlspecs,tuneGrid=expand.grid(C=seq(0.5,5,0.5)))
+```
+
+
+#show the tuning parameter and final SVM linear model from 10 fold CV.
+```{R}
+model_svm_linear$bestTune
+model_svm_linear
+```
+#Based on the accuracy, the cost of 2.5 produces the optimal model with an accuracy of 0.9955.
+
+#Training error with Optimized SVM Linear Kernel model
+```{R}
+predictions_svlinear<-predict(model_svm_linear,train.data)
+confusionMatrix(predictions_svlinear,train.data$BlueTarp,positive = "Y")
+```
+
+#SVM Linear Confusion Matrix on test data (30% of original set)
+```{R}
+predictions_svlinear<-predict(model_svm_linear,newdata = test.data)
+confusionMatrix(predictions_svlinear,test.data$BlueTarp,positive = "Y")
+```
+#The accuracy rate 99.5% and the sensitivity is 88% using this model.
+
+#Decrease Threshold to 0.1 and calculate a new confusion matrix since are more concerned about sensitivity.
+```{R}
+predict_threshold6<-predict(model_svm_linear,newdata=test.data,type="prob")
+alteredProb6<-factor(ifelse(predict_threshold6$Y>=0.1,"Y","N"))
+confusionMatrix(alteredProb6,test.data$BlueTarp,positive = "Y")
+```
+#The accuracy remains high at 0.993, and the sensitivity goes up to 0.937.
+
+#Run an SVM with radial kernel using 10 fold CV with costs ranging from 1 to 5 to find the optimal model. Tune gamma from 0.5 to 2. Gamma defines how far the influence of a single training point reaches (low values are far reaching and high values are close reaching). With high values of gamma the model is more flexible and could have high variance.
+
+```{R}
+set.seed(1)
+model_svm_radial<- train(BlueTarp~ Red+Green+Blue, data=train.data, method = "svmRadial", trControl = ctrlspecs,tuneGrid=expand.grid(C=seq(1,5,1),sigma=seq(0.5,2,0.5)))
+```
+#show the tuning parameter and final SVM Radial model from 10 fold CV.
+```{R}
+model_svm_radial$bestTune
+model_svm_radial
+```
+#The model with a cost of 5 and Gamma of 2 produced the highest accuracy of 0.997.
+
+#Training error with Optimized SVM Radial Kernel model
+```{R}
+predictions_svmrad<-predict(model_svm_radial,train.data)
+confusionMatrix(predictions_svmrad,train.data$BlueTarp,positive = "Y")
+```
+#SVM Radial Confusion Matrix on test data (30% of original set)
+```{R}
+predictions_svmrad<-predict(model_svm_radial,newdata = test.data)
+confusionMatrix(predictions_svmrad,test.data$BlueTarp,positive = "Y")
+```
+#The accuracy is 0.9963 and sensitivity is 0.92903 with a 0.5 threshold.
+
+#Decrease Threshold to 0.1 and calculate a new confusion matrix since are more concerned about sensitivity.
+```{R}
+predict_threshold7<-predict(model_svm_radial,newdata=test.data,type="prob")
+alteredProb7<-factor(ifelse(predict_threshold7$Y>=0.1,"Y","N"))
+confusionMatrix(alteredProb7,test.data$BlueTarp,positive = "Y")
+```
+#The accuracy remains high at 0.9966, but sensitivity goes up to 0.96744 with a threshold of 0.1.
+
+#Run an SVM with polinomial kernal using 10 fold CV with costs ranging from 1 to 5 to find the optimal model.
+```{R}
+set.seed(1)
+model_svm_poly<- train(BlueTarp~ Red+Green+Blue, data=train.data, method = "svmPoly", trControl = ctrlspecs,tuneGrid=expand.grid(C=seq(1,5,1),degree=seq(2,10,1),scale=1))
+```
+#show the tuning parameter and final SVM Polynomial model from 10 fold CV.
+```{R}
+model_svm_poly$bestTune
+model_svm_poly
+```
+#The optimal model with polynomial kernel is with a cost of 5 and degree of 6.
+
+#Training error with Optimized SVM Polynomial Kernel model
+```{R}
+predictions_svmpoly<-predict(model_svm_poly,train.data)
+confusionMatrix(predictions_svmpoly,train.data$BlueTarp,positive = "Y")
+```
+#SVM Polynomial Confusion Matrix on test data (30% of original set)
+```{R}
+predictions_svmpoly<-predict(model_svm_poly,newdata = test.data)
+confusionMatrix(predictions_svmpoly,test.data$BlueTarp,positive = "Y")
+```
+#With a 0.5 threshold the accuracy is 0.9961 and sensitivity is 0.91935.
+
+#Decrease Threshold to 0.1 and calculate a new confusion matrix since are more concerned about sensitivity.
+```{R}
+predict_threshold8<-predict(model_svm_poly,newdata=test.data,type="prob")
+alteredProb8<-factor(ifelse(predict_threshold8$Y>=0.1,"Y","N"))
+confusionMatrix(alteredProb8,test.data$BlueTarp,positive = "Y")
+```
+#After lowering the threshold to 0.1, the accuracy remains high at 0.9919, and the sensitivity goes up to 0.985.
+
+#From the three svm models, it seems like the polynomial kernel produces the best results on the training data. We will see if this holds on the holdout data.
+
+# Hold-out Data / EDA - Load data, explore data, etc. 
+
+#Load data and add a column to classify as Blue Tarp or non Blue Tarp
+```{R}
+village1.tarp<-read.table("orthovnir067_ROI_Blue_Tarps.txt",skip=8,header=FALSE, sep="")
+village1.tarp$BlueTarp<-'Y'
+
+village1.notarp<-read.table("orthovnir067_ROI_NOT_Blue_Tarps.txt",skip=8,header=FALSE, sep="")
+village1.notarp$BlueTarp<-'N'
+
+village2.tarp<-read.table("orthovnir069_ROI_Blue_Tarps.txt",skip=8,header=FALSE,sep="")
+village2.tarp$BlueTarp<-'Y'
+
+village2.notarp<-read.table("orthovnir069_ROI_NOT_Blue_Tarps.txt",skip=8,header=FALSE,sep="")
+village2.notarp$BlueTarp<-'N'
+
+village3.tarp<-read.table("orthovnir078_ROI_Blue_Tarps.txt",skip=8,header=F,sep="")
+village3.tarp$BlueTarp<-'Y'
+
+village3.notarp<-read.table("orthovnir078_ROI_NON_Blue_Tarps.txt",skip=8,header=F,sep="")
+village3.notarp$BlueTarp<-'N'
+
+village4.notarp<-read.table("orthovnir057_ROI_NON_Blue_Tarps.txt",skip=8,header=F,sep="")
+village4.notarp$BlueTarp<-'N'
+```
+
+
+#Combine the files
+```{R}
+village.holdout<-rbind(village1.tarp,village1.notarp,village2.tarp,village2.notarp,village3.tarp,village3.notarp,village4.notarp)
+```
+#insert column header names and set BlueTarp to factor variable
+```{R}
+colnames(village.holdout)[8]<-"Red"
+colnames(village.holdout)[9]<-"Green"
+colnames(village.holdout)[10]<-"Blue"
+village.holdout$BlueTarp<-as.factor(village.holdout$BlueTarp)
+```
+#select columns for analysis
+```{R}
+village.holdout<-village.holdout[8:11]
+```
+
+#EDA using boxplots to compare the training datasets and the holdout dataset.
+```{R}
+par(mfrow=c(3,1))
+boxplot(data$Blue ~ data$BlueTarp, horizontal = T)
+boxplot(data$Red ~ data$BlueTarp, horizontal = T)
+boxplot(data$Green ~ data$BlueTarp, horizontal = T)
+
+par(mfrow=c(3,1))
+boxplot(village.holdout$Blue ~ village.holdout$BlueTarp, horizontal = T)
+boxplot(village.holdout$Red ~ village.holdout$BlueTarp, horizontal = T)
+boxplot(village.holdout$Green ~ village.holdout$BlueTarp, horizontal = T)
+```
+#Using the box plots of the training data and the holdout data, we look to see if there are any similar patterns. We can see that in the training data the values for Blue in Blue tarps are higher and lower for non-blue tarps, i.e., the medians are further apart, the q1 to q3 quartiles are higher for blue tarps vs. non-blue tarps. A very similar behavior is also observed in the hold out data. Looking at Red next, in the training data the medians for blue tarps and non-blue tarps are close to each other, and the Red q1 to q3 quartiles are much wider for non-blue tarps than blue tarps. A similar pattern can be seen in the hold out data with respect to the medians being close to each other. The Red q1 to q3 quartiles are wider for non-blue tarps than blue tarps, but not as much as the training data. For Green, we see the medians are lower for non-blue tarps and the q1 to q3 quartiles are lower too, but they are much wider in range for non-blue tarps. It is somewhat similar in the holdout data where the median is lower for non-blue tarps and so is the q1 to q3 quartiles. However, the range for q1 to q3 quartiles are not as wide for non-blue tarps as they were for the training data. The similarities that were identifiable at least show that we have labeled the RGB columns correctly in the holdout data set since this was not given.
+
+
+# Results (Hold-Out)
+
+#Logistic Regression predictions on holdout data using 0.1 threshold.
+```{R}
+predict_holdout_lr<-predict(model_l,newdata = village.holdout,type="prob")
+predict_holdout_lr_0.1<-factor(ifelse(predict_holdout_lr$Y>=0.1,"Y","N"))
+confusionMatrix(predict_holdout_lr_0.1,village.holdout$BlueTarp,positive = "Y")
+
+```
+
+#ROC Curve and AUROC for Logistic Model
+```{R}
+predictlg <- predict(model_l,village.holdout, type = 'raw')
+
+ROCRpredlg <- prediction(as.numeric(predictlg),as.numeric(village.holdout$BlueTarp))
+
+ROCRperflg<- performance(ROCRpredlg, 'tpr', 'fpr')
+
+plot(ROCRperflg, colorize=TRUE, text.adj=c(-0.2,1.7))
+auc_ROCRlg <- performance(ROCRpredlg, measure = "auc")
+AUClg=auc_ROCRlg@y.values[[1]]
+AUClg
+```
+
+#LDA predictions on holdout data using 0.1 threshold.
+```{R}
+predict_holdout_lda<-predict(model_lda,newdata = village.holdout,type="prob")
+predict_holdout_lda_0.1<-factor(ifelse(predict_holdout_lda$Y>=0.1,"Y","N"))
+confusionMatrix(predict_holdout_lda_0.1,village.holdout$BlueTarp,positive = "Y")
+```
+#ROC Curve and AUROC for LDA Model
+```{R}
+predictlda <- predict(model_lda,village.holdout, type = 'raw')
+
+ROCRpredlda <- prediction(as.numeric(predictlda),as.numeric(village.holdout$BlueTarp))
+
+ROCRperflda<- performance(ROCRpredlda, 'tpr', 'fpr')
+
+plot(ROCRperflda, colorize=TRUE, text.adj=c(-0.2,1.7))
+auc_ROCRlda <- performance(ROCRpredlda, measure = "auc")
+AUClda=auc_ROCRlda@y.values[[1]]
+AUClda
+```
+
+#QDA predictions on holdout data using 0.1 threshold.
+```{R}
+predict_holdout_qda<-predict(model_qda,newdata = village.holdout,type="prob")
+predict_holdout_qda_0.1<-factor(ifelse(predict_holdout_qda$Y>=0.1,"Y","N"))
+confusionMatrix(predict_holdout_qda_0.1,village.holdout$BlueTarp,positive = "Y")
+```
+#ROC Curve and AUROC for QDA Model
+```{R}
+predictqda <- predict(model_qda,village.holdout, type = 'raw')
+
+ROCRpredqda <- prediction(as.numeric(predictqda),as.numeric(village.holdout$BlueTarp))
+
+ROCRperfqda<- performance(ROCRpredqda, 'tpr', 'fpr')
+
+plot(ROCRperfqda, colorize=TRUE, text.adj=c(-0.2,1.7))
+auc_ROCRqda <- performance(ROCRpredqda, measure = "auc")
+AUCqda=auc_ROCRqda@y.values[[1]]
+AUCqda
+```
+#KNN predictions on holdout data using 0.1 threshold.
+```{R}
+predict_holdout_knn<-predict(model_knn,newdata = village.holdout,type="prob")
+predict_holdout_knn_0.1<-factor(ifelse(predict_holdout_knn$Y>=0.1,"Y","N"))
+confusionMatrix(predict_holdout_knn_0.1,village.holdout$BlueTarp,positive = "Y")
+```
+#ROC Curve and AUROC for KNN Model
+```{R}
+predictknn <- predict(model_knn,village.holdout, type = 'raw')
+
+ROCRpredknn <- prediction(as.numeric(predictknn),as.numeric(village.holdout$BlueTarp))
+
+ROCRperfknn<- performance(ROCRpredknn, 'tpr', 'fpr')
+
+plot(ROCRperfknn, colorize=TRUE, text.adj=c(-0.2,1.7))
+auc_ROCRknn <- performance(ROCRpredknn, measure = "auc")
+AUCknn=auc_ROCRknn@y.values[[1]]
+AUCknn
+```
+#Lasso predictions on holdout data using 0.1 threshold.
+```{R}
+x.holdout=model.matrix(BlueTarp~-1+Red+Blue+Green,data=village.holdout)
+predict_holdout_ls<-predict(lasso.fit, s=lasso.fit$lambda.min, newx=x.holdout)
+alteredProb_ls_0.1<-predict_holdout_ls[,1]
+alteredProb_ls_0.1<-factor(ifelse(alteredProb_ls_0.1>=0.1,"Y","N"))
+confusionMatrix(alteredProb_ls_0.1,village.holdout$BlueTarp,positive = "Y")
+```
+#ROC Curve and AUROC for Lasso Model
+```{R}
+predictls <- predict(lasso.fit, s=lasso.fit$lambda.min, newx=x.holdout)
+
+ROCRpredls <- prediction(as.numeric(predictls),as.numeric(village.holdout$BlueTarp))
+
+ROCRperfls<- performance(ROCRpredls, 'tpr', 'fpr')
+
+plot(ROCRperfls, colorize=TRUE, text.adj=c(-0.2,1.7))
+auc_ROCRls <- performance(ROCRpredls, measure = "auc")
+AUCls=auc_ROCRls@y.values[[1]]
+AUCls
+```
+
+#Random forest predictions on holdout data using 0.1 threshold.
+```{R}
+predict_holdout_rf<-predict(model_rf,newdata = village.holdout,type="prob")
+predict_holdout_rf_0.1<-factor(ifelse(predict_holdout_rf$Y>=0.1,"Y","N"))
+confusionMatrix(predict_holdout_rf_0.1,village.holdout$BlueTarp,positive = "Y")
+```
+#ROC Curve and AUROC for Random Forest Model
+```{R}
+predictrf <- predict(model_rf,village.holdout, type = 'raw')
+
+ROCRpredrf <- prediction(as.numeric(predictrf),as.numeric(village.holdout$BlueTarp))
+
+ROCRperfrf<- performance(ROCRpredrf, 'tpr', 'fpr')
+
+plot(ROCRperfrf, colorize=TRUE, text.adj=c(-0.2,1.7))
+auc_ROCRrf <- performance(ROCRpredrf, measure = "auc")
+AUCrf=auc_ROCRrf@y.values[[1]]
+AUCrf
+```
+#SVM Linear predictions on holdout data using 0.1 threshold.
+
+```{R}
+predict_holdout_svmL<-predict(model_svm_linear,newdata = village.holdout,type="prob")
+predict_holdout_svmL_0.1<-factor(ifelse(predict_holdout_svmL$Y>=0.1,"Y","N"))
+confusionMatrix(predict_holdout_svmL_0.1,village.holdout$BlueTarp,positive = "Y")
+```
+#SVM Radial predictions on holdout data using 0.1 threshold.
+
+```{R}
+predict_holdout_svmR<-predict(model_svm_radial,newdata = village.holdout,type="prob")
+predict_holdout_svmR_0.1<-factor(ifelse(predict_holdout_svmR$Y>=0.1,"Y","N"))
+confusionMatrix(predict_holdout_svmR_0.1,village.holdout$BlueTarp,positive = "Y")
+```
+#SVM Polynomial predictions on holdout data using 0.1 threshold.
+
+```{R}
+predict_holdout_svmP<-predict(model_svm_poly,newdata = village.holdout,type="prob")
+predict_holdout_svmP_0.1<-factor(ifelse(predict_holdout_svmP$Y>=0.1,"Y","N"))
+confusionMatrix(predict_holdout_svmP_0.1,village.holdout$BlueTarp,positive = "Y")
+```
+
+#Based on the results of the three SVM kernels on the holdout data, SVM linear produces the highest sensitivity and 99%, Radial is at 78.5%, and Polynomial 49.4%. The overall accuracy rates are about the same (in the 90 plus percentage range). Given that we are more concerned about sensitivity, we will select the SVM Linear kernel from the three SVM models.
+
+#ROC Curve and AUROC for SVM Model
+```{R}
+predictsvm <- predict(model_svm_linear,village.holdout, type = 'raw')
+
+ROCRpredsvm <- prediction(as.numeric(predictsvm),as.numeric(village.holdout$BlueTarp))
+
+ROCRperfsvm<- performance(ROCRpredsvm, 'tpr', 'fpr')
+
+plot(ROCRperfsvm, colorize=TRUE, text.adj=c(-0.2,1.7))
+auc_ROCRsvm <- performance(ROCRpredsvm, measure = "auc")
+AUCsvm=auc_ROCRsvm@y.values[[1]]
+AUCsvm
+```
+**Hold-Out Performance Table Here**
+```{R}
+Model<-c("Log Reg","LDA", "QDA", "KNN", "Penalized Log Reg","Random Forest","SVM")
+Tuning<-c("-","-","-","k=7","lambda=-12.02, alpha=1","mtry=2","kernel=linear, cost=2.5")
+AUROC<-c("0.9889","0.9099","0.8446","0.9019","0.999","0.867","0.9846")
+Threshold<-c("0.1","0.1","0.1","0.1","0.1","0.1","0.1")
+Accuracy<-c("0.9283","0.9781","0.9816","0.985","0.9918","0.9848","0.926")
+TPR<-c("0.9998","0.9032","0.817","0.9054","0.987","0.952","0.994")
+FPR<-c("0.0722","0.022","0.018","0.015","0.01","0.015","0.075")
+Precision<-c("0.0915","0.235","0.257","0.313","0.468","0.3158","0.089")
+CV.Performance2<-data.frame(Model,Tuning,AUROC,Threshold,Accuracy,TPR,FPR,Precision)
+knitr::kable(CV.Performance2,"pipe")
+```
+
+# Final Conclusions
+
+### Conclusion \#1 
+#All the models showed a high accuracy rate of over 98% with the training data. The range was a little wider for sensitivity rates. The reason sensitivity rate is an important factor in this situation is because we are concerned about reaching as many people as possible even if we get some false positives in the process as long as it doesn’t decrease the accuracy rates by much. I reduced the thresholds to 0.1 as described in the above section on thresholds. I had gone with KNN as my best model with the training data as it had a high sensitivity rate of 98%, high precision rate of 89%, and low false positive of 0.4%. But when I ran the models on the hold-out data, I preferred the penalized logistic model that used a lasso penalty. This had a high accuracy of 99%, sensitivity rate of 98.7% and a precision rate of 46.8%. The other models also had high accuracy rates in the hold-out data with results of over 92%, and the false positive ranged from 82% in the QDA to 99% in SVM linear and Penalized logistic regression. As I will discuss in one of my other conclusions, I did not select SVM Linear due to its low precision rate. While the KNN also had good results, the penalized logistic results came out slightly on top on all measures with the biggest difference being in precision (46.8% vs. 31.3%). It appeared that a logistic model would be best here as it did not overtrain the model and when adding the lasso penalty it improved results. The KNN might have slighly overtrained the model.
+
+### Conclusion \#2
+#The results are compatible because the penalized logistic regression performed well in training data with high accuracy and precision rates. It did not have the best sensitivity rate on the training data, but when used on the hold-out data, the sensitivity rate was the highest, which means it did not overtrain on the training dataset. Another reason this is compatible is because the logistic regression model performed well on the training and hold out data, but it was improved when we added the lasso penalty to make the model less flexible and even less prone to overfitting.
+
+### Conclusion \#3
+#The models that I prefer for solving this problem are Penalized Logistic regression and Random Forest. But in the end, I would select Penalized logistic regression with the lasso penalty. While a few models had comparable accuracy rates and sensitivity rates, the biggest difference came in the precision rate. Penalized logistic regression precision came in at a 46.8% and the next best was Random Forest at 31.58%. To me this is important as it saves time because it means we will have less false positives when we compare it to true positives from our predictions. This in turn means we  would reach our true positives i.e blue tarps a lot quicker. I felt this is an important factor to consider in a disaster relief as time is of the essence. So, while many models had comparably high sensitivity rates, the difference came down to differences in the precision rates as models such as SVM, Random Forest, and KNN did not match up to the penalized logistic regression model's precision rates.
+
+### Conclusion \#4 
+#The metrics in the table were relevant for this problem because they helped in determining what factors were important in selecting a model in this scenario. Starting with accuracy, we want a model to get the predictions right as many times as possible. TPR is important because in this model sensitivity is an important factor as we are concerned about reaching as many people as possible even if we get some false positives in the process. The threshold plays an important role in this because this tells us our goal/intention, which in this case was to get a high sensitivity rate. The AUROC tells us our ability to distinguish between classes (blue tarps and non-blue tarps in this case). In other words, it tells us if our model will do better than a flip of a coin, and the models here did that because they came in at over 0.90 in almost all cases. The precision rate is important here as it tells us from our positive predictions how many were actually positive, and as mentioned above, this can be a huge time save in a disaster recovery as we will waste less time with incorrect predictions. The tuning parameters show what we did to get the best model where applicable.
+
+
+### Conclusion \#5
+#When building the models with the different SVM kernels (linear, radial, polynomial), I noticed that the linear kernel did not do well with sensitivity on the training set when compared to the other two kernels. It came in at 93%, whereas radial came in at 96.7%, and polynomial came in even higher at 98.5%. The overall accuracy rates were comparable for all 3 kernels. But when I applied the three models to the hold-out the data, the linear kernel did much better with regards to sensitivity. It came in at 99.4%, which was one of the highest across all models in the project. Radial and Polynomial on the other hand were the lowest performers for sensitivity with 78.5% and 49% respectively. This made me conclude the decision boundary for this dataset is more on the linear side which is not what I had initially thought. The reason I was mistaken is because the Radial and especially the Polynomial models were overfitting on the training data. This is probably also why models such as penalized logistic regression did well and models such as QDA did not. After thinking about it further it would make sense that it is more linear given that the Blue is more prevalent in blue tarps and these points be closer to each other if we were to plot this on a plane.
+
+### Conclusion \#6
+#When running the models on the hold out data, the parametric models ended up doing better than when they were run on the training data. Models such as Logistic regression, SVM Linear, and LDA all improved their sensitivity rates from training to hold out data set. For instance, LDA sensitivity rates went from 82.7% to 90.32% from training to hold-out results. The non-parametric models which make no assumptions on the shape of the boundary decreased in performance when it came to sensitivity rates. For instance, KNN went down from 98.06% to 90.54%. Same applies as for SVM Linear versus SVM polynomial and SVM radial as explained above. Random forest also dropped although not as significantly and still maintained good overall sensitivity rates. The hold-out data set was much larger than the training data set and perhaps with the more data points it showed that this data set actually has more of normal distribution, which is why the parametric models did well in the end. With the smaller subset in the training dataset this might have not been as obvious or prevalent, which is why the non-parametric models did better in training results but they might have ended up overfitting.
+
