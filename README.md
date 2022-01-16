@@ -9,5 +9,5 @@ Models explored include:
   KNN
   Penalized Logistic Regression
   Random Forest
-  SVM (Support Vector Machines)
+  SVM (Support Vector Machines).
 10-fold cross-validation used to evaluate each of the models
